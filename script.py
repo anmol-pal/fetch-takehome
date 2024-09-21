@@ -1,24 +1,27 @@
-import sys, os
+import sys
+import os
 import yaml
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import threading
+import signal
+import queue
+import time
+from urllib.parse import urlparse
 
 TIMER = 15
 
-
-# Configure the logger
 log_file_path = 'output.log'
 logging.basicConfig(
     level=logging.INFO,
-    # format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(message)s',  # This will print only the log message, without any prefixes
     handlers=[
-        logging.FileHandler(log_file_path), 
-        logging.StreamHandler() 
+        logging.FileHandler(log_file_path),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
-
 
 class HTTP_Endpoint:
     def __init__(self, name, url, method, headers, body) -> None:
@@ -32,95 +35,105 @@ class HTTP_Endpoint:
         self.headers = headers
         self.body = body
 
-    def __str__(self):
-        return f"HTTPEndpoint(name={self.name}, url={self.url}, method={self.method}, headers={self.headers}, body={self.body})"
-    
-    def as_dict(self):
-        return {
-            "name": self.name,
-            "url": self.url,
-            "method": self.method,
-            "headers": self.headers,
-            "body": self.body
-        }
-
-class Health:
-    def __init__(self, endpoint: HTTP_Endpoint):
-        self.endpoint = endpoint
-        self.total_requests = 0  # Count of total requests made
-        self.up_count = 0  # Count of times the endpoint was up
+        # Health tracking attributes
+        self.total_requests = 0
+        self.up_count = 0
         self.status = 'UP'
 
+    def __str__(self):
+        return f"HTTPEndpoint(name={self.name}, url={self.url}, method={self.method})"
+
     def good_health(self):
-        self.total_requests +=1
+        self.total_requests += 1
         self.up_count += 1
         self.status = 'UP'
 
     def bad_health(self):
-        self.total_requests +=1
-        self.up_count -= 1
+        self.total_requests += 1
         self.status = 'DOWN'
 
     def get_availability(self):
-        return int(100 * (self.up_count / self.total_requests))
-    
+        return int(100 * (self.up_count / self.total_requests)) if self.total_requests > 0 else 0
 
-def fetch_endpoint(file_name):
+    def hit_endpoint(self):
+        start_time = datetime.now()
+        response = None
+
+        try:
+            if self.method == 'GET':
+                response = requests.get(self.url, headers=self.headers)
+            elif self.method == 'POST':
+                response = requests.post(self.url, headers=self.headers, json=self.body)
+            elif self.method == 'PUT':
+                response = requests.put(self.url, headers=self.headers, json=self.body)
+            elif self.method == 'DELETE':
+                response = requests.delete(self.url, headers=self.headers, json=self.body)
+
+            latency = (datetime.now() - start_time).total_seconds() * 1000
+            if 200 <= response.status_code < 300 and latency < 500:
+                self.good_health()
+            else:
+                self.bad_health()
+        except:
+            self.bad_health()
+        logger.info(f"{urlparse(self.url).netloc} - {self.name} - has {self.get_availability()}% availability")
+
+
+# Global variables
+shutdown_flag = False
+endpoint_queue = queue.Queue()
+
+def signal_handler(sig, frame):
+    global shutdown_flag
+    logger.info("Received shutdown signal. Gracefully shutting down ...")
+    shutdown_flag = True
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+def fetch_endpoints(file_name):
+    # Load the endpoints from the YAML file and add them to the queue
     data = yaml.safe_load(open(file_name).read())
     for d in data:
         endpoint = HTTP_Endpoint(
-            name = d.get('name',None),
-            url = d.get('url', None),
-            method=d.get('method','GET'),
-            headers = d.get('headers') if d.get('headers') and len(d.get('headers')) > 0 else {},
-            body = d.get('body') if d.get('body') else {},
+            name=d.get('name', None),
+            url=d.get('url', None),
+            method=d.get('method', 'GET'),
+            headers=d.get('headers', {}),
+            body=d.get('body', None),
         )
-        health = health_check(endpoint, TIMER)
-        logger.info(endpoint)
-        print(endpoint)
+        endpoint_queue.put(endpoint)
 
-def health_check(endpoint: HTTP_Endpoint, delay_in_seconds: int):
-    def job():
-        print(delay_in_seconds)
-        # if date
-
-
-
-def hit_endpoint(endpoint: HTTP_Endpoint, health: Health):
-    latency = None
-    start_time = datetime.now()
-    response = None
-
-    try:
-        if endpoint.method == 'GET':
-            response = requests.get(endpoint.url, headers=endpoint.headers)
-        elif endpoint.method == 'POST':
-            response = requests.post(endpoint.url, headers=endpoint.headers, json=endpoint.body)
-        elif endpoint.method == 'PUT':
-            response = requests.put(endpoint.url, headers=endpoint.headers, json=endpoint.body)
-        elif endpoint.method == 'DELETE':
-            response = requests.delete(endpoint.url, headers=endpoint.headers, json=endpoint.body)
-        end_time = datetime.now()
-
-    except requests.exceptions.RequestException as e:
-        pass
-    
-    latency = (end_time - start_time).total_seconds() * 1000
-    if response:
-        if 200 <= response.status_code < 300 and latency < 500 :
-            health.good_health()
-    else:
-        health.bad_health()
-    log_information = f"{endpoint.url} has {health.get_availability()} availability percentage"
-    logger.info(log_information)
+def health_check(endpoint: HTTP_Endpoint, duration: int):
+    end_time = datetime.now() + timedelta(seconds=duration)
+    while datetime.now() < end_time and not shutdown_flag:
+        # hit_endpoint(endpoint)
+        endpoint.hit_endpoint()
+        time.sleep(TIMER)
 
 
+def monitor_endpoints():
+    while not shutdown_flag:
+        if endpoint_queue.empty():
+            logger.info("No more endpoints to process. Exiting loop.")
+            break
+        
+        for _ in range(endpoint_queue.qsize()):
+            endpoint = endpoint_queue.get()
+            thread = threading.Thread(target=health_check, args=(endpoint, TIMER))
+            thread.start()
+            endpoint_queue.put(endpoint)
 
+        logger.info("---------------------------")
+        time.sleep(TIMER)
 
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        log_file = sys.argv[1]
+        fetch_endpoints(log_file)
 
-
-
-log_file = None
-if len(sys.argv) > 1:
-    log_file = sys.argv[1]
-    fetch_endpoint(log_file)
+        try:
+            monitor_endpoints()
+        except Exception as e:
+            logger.error(f"Error occurred: {e}")
+    logger.info("Program terminated.")
