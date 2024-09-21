@@ -15,3 +15,10 @@ fetch.com has 55% availability
 www.fetchrewards.com has 33% availability
 Received shutdown signal. Gracefully shutting down ...
 Program terminated.
+---------------------------
+fetch.com has 0% availability
+fetch.com has 50% availability
+fetch.com has 66% availability
+www.fetchrewards.com has 0% availability
+Received shutdown signal. Gracefully shutting down ...
+Program terminated.
