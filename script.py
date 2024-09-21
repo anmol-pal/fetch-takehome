@@ -9,6 +9,7 @@ import signal
 import queue
 import time
 from urllib.parse import urlparse
+from collections import defaultdict
 
 TIMER = 15
 
@@ -23,37 +24,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+health = defaultdict(lambda: (0, 0))
+
 class HTTP_Endpoint:
-    def __init__(self, name, url, method, headers, body) -> None:
+    def __init__(self, name, url ,method, headers, body) -> None:
         if not name:
             raise ValueError("Name is required.")
         if not url:
             raise ValueError("Url is required")
+        
         self.name = name
         self.url = url
+        self.fqdn = urlparse(self.url).netloc
         self.method = method
         self.headers = headers
         self.body = body
 
         # Health tracking attributes
-        self.total_requests = 0
-        self.up_count = 0
         self.status = 'UP'
 
     def __str__(self):
         return f"HTTPEndpoint(name={self.name}, url={self.url}, method={self.method})"
 
     def good_health(self):
-        self.total_requests += 1
-        self.up_count += 1
+        total , success = health[self.fqdn]
+        health[self.fqdn] = (total+1, success+1)
         self.status = 'UP'
 
     def bad_health(self):
-        self.total_requests += 1
+        total , success = health[self.fqdn]
+        health[self.fqdn] = (total+1, success)
         self.status = 'DOWN'
 
     def get_availability(self):
-        return int(100 * (self.up_count / self.total_requests)) if self.total_requests > 0 else 0
+        total, up = health[self.fqdn]
+        return int(100 * (up / total)) if total > 0 else 0
 
     def hit_endpoint(self):
         start_time = datetime.now()
@@ -76,7 +81,7 @@ class HTTP_Endpoint:
                 self.bad_health()
         except:
             self.bad_health()
-        logger.info(f"{urlparse(self.url).netloc} - {self.name} - has {self.get_availability()}% availability")
+        logger.info(f"{urlparse(self.url).netloc} has {self.get_availability()}% availability")
 
 
 # Global variables
