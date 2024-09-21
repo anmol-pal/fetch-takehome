@@ -127,9 +127,12 @@ def monitor_endpoints():
             endpoint = endpoint_queue.get()
             thread = threading.Thread(target=health_check, args=(endpoint,))
             thread.start()
+            thread.join()
             endpoint_queue.put(endpoint)
+
         log_health()
-        time.sleep(15) 
+
+        time.sleep(15)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
