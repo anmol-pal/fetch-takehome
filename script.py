@@ -2,7 +2,7 @@ import sys
 import os
 import yaml
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import threading
 import signal
@@ -11,9 +11,12 @@ import time
 from urllib.parse import urlparse
 from collections import defaultdict
 
-TIMER = 15
-
+# Global variables
+shutdown_flag = False
+endpoint_queue = queue.Queue()
+health = defaultdict(lambda: (0, 0))
 log_file_path = 'output.log'
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(message)s',  # This will print only the log message, without any prefixes
@@ -24,10 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-health = defaultdict(lambda: (0, 0))
-
 class HTTP_Endpoint:
-    def __init__(self, name, url ,method, headers, body) -> None:
+    def __init__(self, name, url, method, headers, body) -> None:
         if not name:
             raise ValueError("Name is required.")
         if not url:
@@ -47,13 +48,13 @@ class HTTP_Endpoint:
         return f"HTTPEndpoint(name={self.name}, url={self.url}, method={self.method})"
 
     def good_health(self):
-        total , success = health[self.fqdn]
-        health[self.fqdn] = (total+1, success+1)
+        total, success = health[self.fqdn]
+        health[self.fqdn] = (total + 1, success + 1)
         self.status = 'UP'
 
     def bad_health(self):
-        total , success = health[self.fqdn]
-        health[self.fqdn] = (total+1, success)
+        total, success = health[self.fqdn]
+        health[self.fqdn] = (total + 1, success)
         self.status = 'DOWN'
 
     def get_availability(self):
@@ -81,12 +82,9 @@ class HTTP_Endpoint:
                 self.bad_health()
         except:
             self.bad_health()
-        logger.info(f"{urlparse(self.url).netloc} has {self.get_availability()}% availability")
 
 
-# Global variables
-shutdown_flag = False
-endpoint_queue = queue.Queue()
+
 
 def signal_handler(sig, frame):
     global shutdown_flag
@@ -96,8 +94,14 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+def log_health():
+    if health:
+        for fqdn, (total, success) in health.items():
+            avail = int(100 * (success / total)) if total > 0 else 0
+            logger.info(f"{fqdn} has {avail}% availability")
+        logger.info("---------------------------")
+
 def fetch_endpoints(file_name):
-    # Load the endpoints from the YAML file and add them to the queue
     data = yaml.safe_load(open(file_name).read())
     for d in data:
         endpoint = HTTP_Endpoint(
@@ -109,28 +113,23 @@ def fetch_endpoints(file_name):
         )
         endpoint_queue.put(endpoint)
 
-def health_check(endpoint: HTTP_Endpoint, duration: int):
-    end_time = datetime.now() + timedelta(seconds=duration)
-    while datetime.now() < end_time and not shutdown_flag:
-        # hit_endpoint(endpoint)
-        endpoint.hit_endpoint()
-        time.sleep(TIMER)
-
+def health_check(endpoint: HTTP_Endpoint):
+    endpoint.hit_endpoint()
 
 def monitor_endpoints():
     while not shutdown_flag:
         if endpoint_queue.empty():
-            logger.info("No more endpoints to process. Exiting loop.")
-            break
+            logger.info("No more endpoints to process. Waiting for new endpoints...")
+            time.sleep(15)  # Control the main loop timing
+            continue
         
         for _ in range(endpoint_queue.qsize()):
             endpoint = endpoint_queue.get()
-            thread = threading.Thread(target=health_check, args=(endpoint, TIMER))
+            thread = threading.Thread(target=health_check, args=(endpoint,))
             thread.start()
             endpoint_queue.put(endpoint)
-
-        logger.info("---------------------------")
-        time.sleep(TIMER)
+        log_health()
+        time.sleep(15) 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
